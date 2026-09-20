@@ -1,6 +1,7 @@
 <?php
 
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Testing\TestResponse;
 use Tests\TestCase;
 
 /*
@@ -44,7 +45,26 @@ expect()->extend('toBeOne', function () {
 |
 */
 
-function something()
+/**
+ * Parses the Server-Timing header emitted by the bench middleware.
+ *
+ * @return array{app: float|null, db: float|null, boot: float|null, queries: int|null}
+ */
+function serverTimings(TestResponse $response): array
 {
-    // ..
+    $header = $response->headers->get('Server-Timing', '');
+
+    preg_match_all('/(?<name>[a-z]+);dur=(?<duration>[\d.]+)/', $header, $durations, PREG_SET_ORDER);
+
+    $timings = ['app' => null, 'db' => null, 'boot' => null, 'queries' => null];
+
+    foreach ($durations as $duration) {
+        $timings[$duration['name']] = (float) $duration['duration'];
+    }
+
+    if (preg_match('/desc="(?<count>\d+) queries"/', $header, $queries) === 1) {
+        $timings['queries'] = (int) $queries['count'];
+    }
+
+    return $timings;
 }
