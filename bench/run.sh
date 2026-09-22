@@ -27,7 +27,7 @@ echo
 k6 run \
     -e "BASE_URL=$BASE_URL" \
     -e "RUN_ID=$RUN_ID" \
-    -e "RATE=${RATE:-20}" \
+    -e "RATE_SCALE=${RATE_SCALE:-1}" \
     -e "DURATION_S=${DURATION_S:-30}" \
     bench/k6/scenarios.js
 

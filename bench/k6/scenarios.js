@@ -16,24 +16,28 @@ import { check } from 'k6';
 import { Trend } from 'k6/metrics';
 
 const BASE_URL = (__ENV.BASE_URL || '').replace(/\/$/, '');
-const RATE = Number(__ENV.RATE || 20);
+// Multiplies every scenario rate. Leave at 1 to measure latency; raise it to
+// look for the saturation point, which is a different question.
+const RATE_SCALE = Number(__ENV.RATE_SCALE || 1);
 const DURATION_S = Number(__ENV.DURATION_S || 30);
-const WARMUP_REQUESTS = Number(__ENV.WARMUP_REQUESTS || 50);
 const RUN_ID = __ENV.RUN_ID || `run-${Date.now()}`;
 
 // Pause between scenarios so a queue built by one does not spill into the next.
 const GAP_S = 5;
 
-const PATHS = {
-  noop: '/b/noop',
-  cpu: '/b/cpu',
-  db1: '/b/db/1',
-  db50: '/b/db/50',
+// Rates sit well under what the environment sustains, so the figures are
+// latency rather than queueing. Warm-up is sized per scenario: 50 requests of
+// db50 alone would cost 20 seconds.
+const SCENARIOS = {
+  noop: { path: '/b/noop', rate: 5, warmup: 20 },
+  cpu: { path: '/b/cpu', rate: 5, warmup: 20 },
+  db1: { path: '/b/db/1', rate: 5, warmup: 20 },
+  db50: { path: '/b/db/50', rate: 2, warmup: 5 },
 };
 
 // One metric set per scenario: k6 aggregates a shared metric across all tags.
 const metrics = {};
-for (const name of Object.keys(PATHS)) {
+for (const name of Object.keys(SCENARIOS)) {
   metrics[name] = {
     app: new Trend(`app_ms_${name}`),
     boot: new Trend(`boot_ms_${name}`),
@@ -46,16 +50,16 @@ export const options = {
   discardResponseBodies: true,
   summaryTrendStats: ['avg', 'min', 'med', 'p(95)', 'p(99)', 'max', 'count'],
   scenarios: Object.fromEntries(
-    Object.keys(PATHS).map((name, index) => [
+    Object.entries(SCENARIOS).map(([name, scenario], index) => [
       name,
       {
         executor: 'constant-arrival-rate',
-        rate: RATE,
+        rate: scenario.rate * RATE_SCALE,
         timeUnit: '1s',
         duration: `${DURATION_S}s`,
         // Headroom so the generator is never the bottleneck being measured.
-        preAllocatedVUs: Math.max(10, RATE),
-        maxVUs: Math.max(50, RATE * 5),
+        preAllocatedVUs: Math.max(10, scenario.rate * RATE_SCALE),
+        maxVUs: Math.max(50, scenario.rate * RATE_SCALE * 5),
         startTime: `${index * (DURATION_S + GAP_S)}s`,
         exec: 'scenario',
         env: { SCENARIO: name },
@@ -81,9 +85,9 @@ export function setup() {
     throw new Error('BASE_URL is required');
   }
 
-  for (const path of Object.values(PATHS)) {
-    for (let i = 0; i < WARMUP_REQUESTS; i++) {
-      http.get(`${BASE_URL}${path}`);
+  for (const scenario of Object.values(SCENARIOS)) {
+    for (let i = 0; i < scenario.warmup; i++) {
+      http.get(`${BASE_URL}${scenario.path}`);
     }
   }
 
@@ -94,7 +98,7 @@ export function setup() {
 
 export function scenario() {
   const name = __ENV.SCENARIO;
-  const response = http.get(`${BASE_URL}${PATHS[name]}`);
+  const response = http.get(`${BASE_URL}${SCENARIOS[name].path}`);
 
   check(response, { 'status is 200': (r) => r.status === 200 });
 
@@ -109,7 +113,7 @@ export function scenario() {
 }
 
 export function handleSummary(data) {
-  const rows = Object.keys(PATHS).map((name) => {
+  const rows = Object.entries(SCENARIOS).map(([name, scenario]) => {
     const stats = (metric) => {
       const values = data.metrics[`${metric}_${name}`]?.values;
 
@@ -118,7 +122,8 @@ export function handleSummary(data) {
 
     return {
       scenario: name,
-      path: PATHS[name],
+      path: scenario.path,
+      rate_per_second: scenario.rate * RATE_SCALE,
       requests: data.metrics[`ttfb_ms_${name}`]?.values?.count ?? 0,
       ttfb_ms: stats('ttfb_ms'),
       app_ms: stats('app_ms'),
@@ -131,7 +136,7 @@ export function handleSummary(data) {
     run_id: RUN_ID,
     base_url: BASE_URL,
     recorded_at: new Date().toISOString(),
-    load: { rate_per_second: RATE, duration_s: DURATION_S },
+    load: { duration_s: DURATION_S, rate_scale: RATE_SCALE },
     environment: data.setup_data?.info ?? null,
     scenarios: rows,
   };
