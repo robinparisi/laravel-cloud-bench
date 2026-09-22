@@ -8,13 +8,11 @@ return [
     |--------------------------------------------------------------------------
     |
     | Reported by the /b/info endpoint so a result set can be attributed to the
-    | environment and the commit that produced it. Set both per environment.
+    | environment that produced it. Set it per environment.
     |
     */
 
     'region' => env('BENCH_REGION'),
-
-    'commit' => env('BENCH_COMMIT'),
 
     /*
     |--------------------------------------------------------------------------

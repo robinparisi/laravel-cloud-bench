@@ -19,7 +19,6 @@ class RuntimeInfoController extends Controller
 
         return response()->json([
             'region' => config('bench.region'),
-            'commit' => config('bench.commit'),
             'environment' => app()->environment(),
             'php' => PHP_VERSION,
             'sapi' => PHP_SAPI,
