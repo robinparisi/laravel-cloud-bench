@@ -4,6 +4,7 @@ use App\Http\Controllers\Bench\CpuController;
 use App\Http\Controllers\Bench\DatabaseController;
 use App\Http\Controllers\Bench\NoopController;
 use App\Http\Controllers\Bench\RuntimeInfoController;
+use App\Http\Controllers\Bench\SleepController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -14,4 +15,5 @@ use Illuminate\Support\Facades\Route;
 Route::get('info', RuntimeInfoController::class)->name('info');
 Route::get('noop', NoopController::class)->name('noop');
 Route::get('cpu', CpuController::class)->name('cpu');
+Route::get('sleep', SleepController::class)->name('sleep');
 Route::get('db/{queries}', DatabaseController::class)->whereNumber('queries')->name('db');

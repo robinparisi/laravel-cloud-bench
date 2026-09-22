@@ -30,6 +30,10 @@ return [
         'max_iterations' => 5_000_000,
     ],
 
+    'sleep' => [
+        'max_ms' => 1_000,
+    ],
+
     'database' => [
         'rows' => (int) env('BENCH_DB_ROWS', 1_000),
         'max_queries' => 200,
