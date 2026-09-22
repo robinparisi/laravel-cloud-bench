@@ -40,3 +40,4 @@ yarn-error.log
 
 /frankenphp
 /public/frankenphp-worker.php
+/bench/results/*.json
