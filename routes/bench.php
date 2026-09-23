@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Bench\BladeController;
 use App\Http\Controllers\Bench\CpuController;
 use App\Http\Controllers\Bench\DatabaseController;
 use App\Http\Controllers\Bench\NoopController;
@@ -16,4 +17,5 @@ Route::get('info', RuntimeInfoController::class)->name('info');
 Route::get('noop', NoopController::class)->name('noop');
 Route::get('cpu', CpuController::class)->name('cpu');
 Route::get('sleep', SleepController::class)->name('sleep');
+Route::get('blade', BladeController::class)->name('blade');
 Route::get('db/{queries}', DatabaseController::class)->whereNumber('queries')->name('db');

@@ -30,6 +30,11 @@ return [
         'max_iterations' => 5_000_000,
     ],
 
+    'blade' => [
+        'rows' => 50,
+        'max_rows' => 500,
+    ],
+
     'sleep' => [
         'max_ms' => 1_000,
     ],
