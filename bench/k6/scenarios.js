@@ -31,6 +31,21 @@ const GAP_S = 5;
 const EDGE_PATH = '/cdn-cgi/trace';
 const REFERENCE_SAMPLES = 15;
 
+// One route, one response, many URLs: the argument is never read, so all of
+// them return the same bytes. Each iteration requests every one of them in
+// rotating order, so neither drift over the run nor position within the
+// iteration can explain a spread between them. A pair would only show the
+// spread when the two happen to land apart; a dozen make it visible anywhere.
+const BUCKET_URL_COUNT = Number(__ENV.BUCKET_URL_COUNT || 10);
+// Runs that control alone: it is all a rate sweep needs, and the application
+// scenarios would saturate a single worker long before the rate says anything.
+const BUCKET_ONLY = __ENV.BUCKET_ONLY === '1';
+
+const BUCKET_URLS = Array.from(
+  { length: BUCKET_URL_COUNT },
+  (_, index) => `/b/noop?x=${index + 1}`,
+);
+
 // Rates sit well under what the environment sustains, so the figures are
 // latency rather than queueing. Warm-up is sized per scenario: 50 requests of
 // db50 alone would cost 20 seconds.
@@ -38,6 +53,8 @@ const SCENARIOS = {
   noop: { path: '/b/noop', rate: 5, warmup: 20 },
   cpu: { path: '/b/cpu', rate: 5, warmup: 20 },
   blade: { path: '/b/blade?rows=50', rate: 5, warmup: 20 },
+  // Same markup, rendered without components: the difference prices one.
+  bladePlain: { path: '/b/blade?rows=50&mode=plain', rate: 5, warmup: 20 },
   db1: { path: '/b/db/1', rate: 5, warmup: 20 },
   db50: { path: '/b/db/50', rate: 2, warmup: 5 },
 };
@@ -59,11 +76,13 @@ for (const name of Object.keys(SCENARIOS)) {
   };
 }
 
+const bucketMetrics = BUCKET_URLS.map((_, index) => new Trend(`ttfb_ms_bucket${index}`));
+
 export const options = {
   discardResponseBodies: true,
   summaryTrendStats: ['avg', 'min', 'med', 'p(95)', 'p(99)', 'max', 'count'],
   scenarios: Object.fromEntries(
-    Object.entries(SCENARIOS).map(([name, scenario], index) => [
+    (BUCKET_ONLY ? [] : Object.entries(SCENARIOS)).map(([name, scenario], index) => [
       name,
       {
         executor: 'constant-arrival-rate',
@@ -80,6 +99,18 @@ export const options = {
       },
     ]),
   ),
+};
+
+options.scenarios.bucket = {
+  executor: 'constant-arrival-rate',
+  rate: 2 * RATE_SCALE,
+  timeUnit: '1s',
+  duration: `${DURATION_S}s`,
+  preAllocatedVUs: 10,
+  maxVUs: 50,
+  startTime: BUCKET_ONLY ? '0s' : `${Object.keys(SCENARIOS).length * (DURATION_S + GAP_S)}s`,
+  exec: 'bucketPair',
+  tags: { scenario: 'bucket' },
 };
 
 function serverTiming(response, name) {
@@ -113,7 +144,7 @@ export function setup() {
     throw new Error('BASE_URL is required');
   }
 
-  for (const scenario of Object.values(SCENARIOS)) {
+  for (const scenario of BUCKET_ONLY ? [] : Object.values(SCENARIOS)) {
     for (let i = 0; i < scenario.warmup; i++) {
       http.get(`${BASE_URL}${scenario.path}`);
     }
@@ -166,6 +197,15 @@ export function scenario(data) {
   metrics[name].beyondEdge.add(ttfb - server - edge);
 }
 
+export function bucketPair() {
+  for (let i = 0; i < BUCKET_URLS.length; i++) {
+    // Rotating start, so no URL is always requested first.
+    const index = (i + __ITER) % BUCKET_URLS.length;
+
+    bucketMetrics[index].add(http.get(`${BASE_URL}${BUCKET_URLS[index]}`).timings.waiting);
+  }
+}
+
 export function handleSummary(data) {
   const stats = (metric, name) => {
     const values = data.metrics[`${metric}_${name}`]?.values;
@@ -179,7 +219,7 @@ export function handleSummary(data) {
       : null;
   };
 
-  const rows = Object.entries(SCENARIOS).map(([name, scenario]) => ({
+  const rows = (BUCKET_ONLY ? [] : Object.entries(SCENARIOS)).map(([name, scenario]) => ({
     scenario: name,
     path: scenario.path,
     rate_per_second: scenario.rate * RATE_SCALE,
@@ -207,6 +247,13 @@ export function handleSummary(data) {
       beyond_edge_ms: 'ttfb_ms - edge_ms - server_ms: everything between the edge and PHP, which nothing in the chain reports',
       ttfb_ms: 'time to first byte measured by the client',
     },
+    // A control, not a scenario: URLs that differ only by an argument the
+    // application never reads, so any spread belongs to the chain in front
+    // of it rather than to the response.
+    bucket: BUCKET_URLS.map((path, index) => ({
+      path,
+      ttfb_ms: stats('ttfb_ms', `bucket${index}`),
+    })),
     environment: data.setup_data?.info ?? null,
     edge: data.setup_data?.edge ?? null,
     reference: data.setup_data?.reference ?? null,

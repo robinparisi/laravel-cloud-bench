@@ -29,6 +29,8 @@ k6 run \
     -e "RUN_ID=$RUN_ID" \
     -e "RATE_SCALE=${RATE_SCALE:-1}" \
     -e "DURATION_S=${DURATION_S:-30}" \
+    -e "BUCKET_ONLY=${BUCKET_ONLY:-0}" \
+    -e "BUCKET_URL_COUNT=${BUCKET_URL_COUNT:-10}" \
     bench/k6/scenarios.js
 
 echo "Written to bench/results/${RUN_ID}.json"
