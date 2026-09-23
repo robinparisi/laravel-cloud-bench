@@ -25,24 +25,37 @@ const RUN_ID = __ENV.RUN_ID || `run-${Date.now()}`;
 // Pause between scenarios so a queue built by one does not spill into the next.
 const GAP_S = 5;
 
+// Answered by the Cloudflare edge itself, so it never reaches the container
+// and is never cached. It is the only reference that stays valid: a static file
+// measures the edge cache on a hit, and a costlier cache-filling path on a miss.
+const EDGE_PATH = '/cdn-cgi/trace';
+const REFERENCE_SAMPLES = 15;
+
 // Rates sit well under what the environment sustains, so the figures are
 // latency rather than queueing. Warm-up is sized per scenario: 50 requests of
 // db50 alone would cost 20 seconds.
 const SCENARIOS = {
   noop: { path: '/b/noop', rate: 5, warmup: 20 },
   cpu: { path: '/b/cpu', rate: 5, warmup: 20 },
+  blade: { path: '/b/blade?rows=50', rate: 5, warmup: 20 },
   db1: { path: '/b/db/1', rate: 5, warmup: 20 },
   db50: { path: '/b/db/50', rate: 2, warmup: 5 },
 };
 
 // One metric set per scenario: k6 aggregates a shared metric across all tags.
+// Every one of these is recorded per request, so their percentiles describe
+// real requests rather than a subtraction between two aggregates.
 const metrics = {};
 for (const name of Object.keys(SCENARIOS)) {
   metrics[name] = {
+    ttfb: new Trend(`ttfb_ms_${name}`),
+    server: new Trend(`server_ms_${name}`),
     app: new Trend(`app_ms_${name}`),
     boot: new Trend(`boot_ms_${name}`),
     db: new Trend(`db_ms_${name}`),
-    ttfb: new Trend(`ttfb_ms_${name}`),
+    receiving: new Trend(`receiving_ms_${name}`),
+    edge: new Trend(`edge_ms_${name}`),
+    beyondEdge: new Trend(`beyond_edge_ms_${name}`),
   };
 }
 
@@ -76,10 +89,25 @@ function serverTiming(response, name) {
   return match ? parseFloat(match[1]) : null;
 }
 
+function median(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
 /**
- * Warms every endpoint before the measured run, and captures the environment
- * metadata the results have to be filed under.
+ * Times a path that no scenario measures, to serve as a reference layer.
  */
+function reference(path) {
+  const samples = [];
+
+  for (let i = 0; i < REFERENCE_SAMPLES; i++) {
+    samples.push(http.get(`${BASE_URL}${path}`).timings.waiting);
+  }
+
+  return +median(samples).toFixed(2);
+}
+
 export function setup() {
   if (!BASE_URL) {
     throw new Error('BASE_URL is required');
@@ -92,11 +120,21 @@ export function setup() {
   }
 
   const info = http.get(`${BASE_URL}/b/info`, { responseType: 'text' });
+  const probe = http.get(`${BASE_URL}${SCENARIOS.noop.path}`);
 
-  return { info: info.status === 200 ? JSON.parse(info.body) : { error: info.status } };
+  return {
+    info: info.status === 200 ? JSON.parse(info.body) : { error: info.status },
+    // Records which edge answered, and whether it added timings of its own.
+    edge: {
+      ray: probe.headers['Cf-Ray'] ?? null,
+      cache_status: probe.headers['Cf-Cache-Status'] ?? null,
+      server_timing: probe.headers['Server-Timing'] ?? null,
+    },
+    reference: { client_to_edge_ms: reference(EDGE_PATH) },
+  };
 }
 
-export function scenario() {
+export function scenario(data) {
   const name = __ENV.SCENARIO;
   const response = http.get(`${BASE_URL}${SCENARIOS[name].path}`);
 
@@ -105,52 +143,86 @@ export function scenario() {
   const app = serverTiming(response, 'app');
   const boot = serverTiming(response, 'boot');
   const db = serverTiming(response, 'db');
+  const ttfb = response.timings.waiting;
 
-  metrics[name].ttfb.add(response.timings.waiting);
+  metrics[name].ttfb.add(ttfb);
+  metrics[name].receiving.add(response.timings.receiving);
   if (app !== null) metrics[name].app.add(app);
   if (boot !== null) metrics[name].boot.add(boot);
   if (db !== null) metrics[name].db.add(db);
+
+  if (app === null) {
+    return;
+  }
+
+  const server = app + (boot ?? 0);
+  const edge = data.reference.client_to_edge_ms;
+
+  metrics[name].server.add(server);
+  metrics[name].edge.add(edge);
+  // Everything between the edge holding the request and PHP answering it:
+  // the hop to the container, platform routing, queueing, and the response
+  // serialisation that happens after the middleware stops counting.
+  metrics[name].beyondEdge.add(ttfb - server - edge);
 }
 
 export function handleSummary(data) {
-  const rows = Object.entries(SCENARIOS).map(([name, scenario]) => {
-    const stats = (metric) => {
-      const values = data.metrics[`${metric}_${name}`]?.values;
+  const stats = (metric, name) => {
+    const values = data.metrics[`${metric}_${name}`]?.values;
 
-      return values ? { med: values.med, p95: values['p(95)'], p99: values['p(99)'] } : null;
-    };
+    return values
+      ? {
+          med: +values.med.toFixed(2),
+          p95: +values['p(95)'].toFixed(2),
+          p99: +values['p(99)'].toFixed(2),
+        }
+      : null;
+  };
 
-    return {
-      scenario: name,
-      path: scenario.path,
-      rate_per_second: scenario.rate * RATE_SCALE,
-      requests: data.metrics[`ttfb_ms_${name}`]?.values?.count ?? 0,
-      ttfb_ms: stats('ttfb_ms'),
-      app_ms: stats('app_ms'),
-      boot_ms: stats('boot_ms'),
-      db_ms: stats('db_ms'),
-    };
-  });
+  const rows = Object.entries(SCENARIOS).map(([name, scenario]) => ({
+    scenario: name,
+    path: scenario.path,
+    rate_per_second: scenario.rate * RATE_SCALE,
+    requests: data.metrics[`ttfb_ms_${name}`]?.values?.count ?? 0,
+    // These three add up to ttfb_ms, each recorded on the same request.
+    edge_ms: stats('edge_ms', name),
+    beyond_edge_ms: stats('beyond_edge_ms', name),
+    server_ms: stats('server_ms', name),
+    ttfb_ms: stats('ttfb_ms', name),
+    // Detail within server_ms, and the body transfer that follows the TTFB.
+    app_ms: stats('app_ms', name),
+    boot_ms: stats('boot_ms', name),
+    db_ms: stats('db_ms', name),
+    receiving_ms: stats('receiving_ms', name),
+  }));
 
   const result = {
     run_id: RUN_ID,
     base_url: BASE_URL,
     recorded_at: new Date().toISOString(),
     load: { duration_s: DURATION_S, rate_scale: RATE_SCALE },
+    legend: {
+      edge_ms: `client to the Cloudflare edge and back, measured on ${EDGE_PATH}, which the edge answers without reaching the container`,
+      server_ms: 'app + boot, as the application reports them through Server-Timing',
+      beyond_edge_ms: 'ttfb_ms - edge_ms - server_ms: everything between the edge and PHP, which nothing in the chain reports',
+      ttfb_ms: 'time to first byte measured by the client',
+    },
     environment: data.setup_data?.info ?? null,
+    edge: data.setup_data?.edge ?? null,
+    reference: data.setup_data?.reference ?? null,
     scenarios: rows,
   };
 
   const table = rows
     .map((row) => {
-      const cell = (stats) => (stats ? `${stats.med.toFixed(1)} / ${stats.p95.toFixed(1)}` : '-');
+      const cell = (s) => (s ? String(s.med).padStart(8) : '       -');
 
-      return `  ${row.scenario.padEnd(6)} ttfb ${cell(row.ttfb_ms).padEnd(18)} app ${cell(row.app_ms)}`;
+      return `  ${row.scenario.padEnd(6)}${cell(row.edge_ms)}${cell(row.beyond_edge_ms)}${cell(row.server_ms)}${cell(row.ttfb_ms)}`;
     })
     .join('\n');
 
   return {
-    stdout: `\n${RUN_ID} — median / p95 in ms\n${table}\n`,
+    stdout: `\n${RUN_ID} — medians in ms\n  ${'scenario'.padEnd(6)}${'edge'.padStart(8)}${'beyond'.padStart(8)}${'server'.padStart(8)}${'ttfb'.padStart(8)}\n${table}\n`,
     [`bench/results/${RUN_ID}.json`]: JSON.stringify(result, null, 2),
   };
 }
