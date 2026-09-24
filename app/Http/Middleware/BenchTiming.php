@@ -5,6 +5,7 @@ namespace App\Http\Middleware;
 use App\Bench\RequestTimings;
 use Closure;
 use Illuminate\Http\Request;
+use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
@@ -45,7 +46,32 @@ class BenchTiming
         $response->headers->set('Server-Timing', implode(', ', $metrics));
         $response->headers->set('X-Bench-Worker-Requests', (string) $this->timings->requestsServed());
 
+        $tier = $this->upperTier($request);
+
+        if ($tier !== null) {
+            $response->headers->set('X-Bench-Tier', $tier);
+        }
+
         return $response;
+    }
+
+    /**
+     * The data centre the request reached the origin through, from the CF-Ray
+     * the origin received.
+     *
+     * The client sees the one it entered through, which is not the same: a
+     * request can be forwarded via another data centre on the way in, and that
+     * detour lands in the client's time without appearing anywhere else.
+     */
+    private function upperTier(Request $request): ?string
+    {
+        $ray = $request->header('CF-Ray');
+
+        if (! is_string($ray) || ! str_contains($ray, '-')) {
+            return null;
+        }
+
+        return Str::afterLast($ray, '-');
     }
 
     /**

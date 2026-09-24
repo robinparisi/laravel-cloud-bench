@@ -150,6 +150,13 @@ export function setup() {
     }
   }
 
+  // The data centre a URL is routed through is stable, so one probe each is
+  // enough, and it explains a scenario's TTFB better than any warning could.
+  const tiers = {};
+  for (const [name, scenario] of Object.entries(SCENARIOS)) {
+    tiers[name] = http.get(`${BASE_URL}${scenario.path}`).headers['X-Bench-Tier'] ?? null;
+  }
+
   const info = http.get(`${BASE_URL}/b/info`, { responseType: 'text' });
   const probe = http.get(`${BASE_URL}${SCENARIOS.noop.path}`);
 
@@ -161,6 +168,7 @@ export function setup() {
       cache_status: probe.headers['Cf-Cache-Status'] ?? null,
       server_timing: probe.headers['Server-Timing'] ?? null,
     },
+    tiers,
     reference: { client_to_edge_ms: reference(EDGE_PATH) },
   };
 }
@@ -222,6 +230,8 @@ export function handleSummary(data) {
   const rows = (BUCKET_ONLY ? [] : Object.entries(SCENARIOS)).map(([name, scenario]) => ({
     scenario: name,
     path: scenario.path,
+    // The data centre this URL reaches the origin through.
+    tier: data.setup_data?.tiers?.[name] ?? null,
     rate_per_second: scenario.rate * RATE_SCALE,
     requests: data.metrics[`ttfb_ms_${name}`]?.values?.count ?? 0,
     // These three add up to ttfb_ms, each recorded on the same request.

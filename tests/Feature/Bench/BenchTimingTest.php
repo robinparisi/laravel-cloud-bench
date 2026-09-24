@@ -69,3 +69,15 @@ test('formats durations with a dot under a comma-decimal locale', function () {
         setlocale(LC_NUMERIC, $previous);
     }
 });
+
+test('reports the data centre the request reached the origin through', function () {
+    $response = $this->withHeaders(['CF-Ray' => 'a3fc90bdad39d0a7-MAD'])->get(route('bench.noop'));
+
+    expect($response->headers->get('X-Bench-Tier'))->toBe('MAD');
+});
+
+test('omits the data centre when the request did not come through an edge', function () {
+    $response = $this->get(route('bench.noop'));
+
+    expect($response->headers->has('X-Bench-Tier'))->toBeFalse();
+});
