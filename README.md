@@ -115,15 +115,29 @@ IATA code of the data centre that handled it. The client reads it from the
 response header. The origin receives its own copy, which `/b/peer` echoes back
 and every other bench route exposes as `X-Bench-Tier`.
 
-On one and the same request, the two disagree:
+On one and the same request, the two disagree.
+
+### Ray ID pairs
+
+Raw output of `bench/ray-pairs.sh`, ten URLs in one second:
 
 ```
-client, response header    a3fc5defbd8b592b-CDG
-origin, /b/peer            a3fc5defbd8b592b-MAD
+timestamp (UTC)        url              ttfb_ms  detour  cf-ray, client         cf-ray, origin
+2026-09-25T15:15:31Z   /b/peer?x=1      38.7     no      a40afc19be362e92-CDG   a40afc19be362e92-CDG
+2026-09-25T15:15:31Z   /b/peer?x=2      60.3     no      a40afc1a5a26d560-CDG   a40afc1a5a26d560-CDG
+2026-09-25T15:15:31Z   /b/peer?x=3      142.3    YES     a40afc1b1ee5bb7b-CDG   a40afc1b1ee5bb7b-MAD
+2026-09-25T15:15:31Z   /b/peer?x=4      54.2     YES     a40afc1c6a574e73-CDG   a40afc1c6a574e73-AMS
+2026-09-25T15:15:31Z   /b/peer?x=5      92.7     YES     a40afc1d2a88d574-CDG   a40afc1d2a88d574-MAD
+2026-09-25T15:15:32Z   /b/peer?x=6      86.3     YES     a40afc1e18baf0d3-CDG   a40afc1e18baf0d3-MAD
+2026-09-25T15:15:32Z   /b/peer?x=7      51.9     YES     a40afc1f0883d10c-CDG   a40afc1f0883d10c-AMS
+2026-09-25T15:15:32Z   /b/peer?x=8      47.1     no      a40afc1fa89c2285-CDG   a40afc1fa89c2285-CDG
+2026-09-25T15:15:32Z   /b/peer?x=9      67.9     YES     a40afc2059f04562-CDG   a40afc2059f04562-MRS
+2026-09-25T15:15:32Z   /b/peer?x=10     61.0     YES     a40afc211c181b44-CDG   a40afc211c181b44-MRS
 ```
 
-Same identifier, different data centre: the request entered at Paris and reached
-the origin through Madrid. The latency is the detour:
+The identifier matches on every line; the data centre does not on seven of them.
+Three URLs reach the origin from Paris, with no detour at all. The latency
+follows:
 
 | through | path                          | straight line |  TTFB |
 | ------- | ----------------------------- | ------------: | ----: |
