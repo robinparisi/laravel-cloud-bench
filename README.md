@@ -147,33 +147,60 @@ follows:
 | `MAD`   | Paris → Madrid → Frankfurt    |       2500 km | 81-89 |
 
 These responses are `cache-control: no-cache, private`, so Cloudflare marks them
-`cf-cache-status: BYPASS` and caches them nowhere. The upper tier stores nothing
+[`cf-cache-status: BYPASS`](https://developers.cloudflare.com/cache/concepts/cache-responses/#bypass) and caches them nowhere. The
+[upper tier](https://developers.cloudflare.com/cache/how-to/tiered-cache/) stores nothing
 and spares the origin nothing: on dynamic routes the detour is pure cost,
-**up to 50 ms on every request**, decided by the URL.
+**40 to 50 ms on every request from Paris**, decided by the URL.
 
 ### Why a dynamic request takes the detour
 
-`cf-cache-status` records two different refusals. `DYNAMIC` is decided when the
-request arrives, from the URL and the zone's rules, before the cache is
-consulted at all. `BYPASS` is decided from the response: the request _was_
-eligible, and only the headers it came back with prevented storing.
+By default, Cloudflare caches by file extension only, and ["does not cache HTML
+or JSON by default"](https://developers.cloudflare.com/cache/concepts/default-cache-behavior/). A URL like `/b/noop` should therefore come
+back [`DYNAMIC`](https://developers.cloudflare.com/cache/concepts/cache-responses/#dynamic): judged ineligible on arrival, and sent to the origin "without a cache lookup",
+so without an upper tier.
 
-These responses come back `BYPASS`. They were therefore eligible on arrival, and
-tiered on that basis. Nothing is stored, so nothing is learned from it: the next
-request takes the same detour.
+These responses come back `BYPASS` instead. For a URL with no extension,
+[Cloudflare's own documentation](https://developers.cloudflare.com/cache/concepts/cache-responses/#bypass) leaves one way to get there:
 
-The upper tier is picked by hashing the cache key, within a regional pool and
-without regard to where the origin sits. From Paris that pool includes Madrid.
+> If you configured a Cache Rule with Eligible for cache set to Yes (for
+> example, on HTML content) and the origin returns a non-cacheable
+> Cache-Control directive, the response is returned with CF-Cache-Status:
+> BYPASS — not DYNAMIC.
 
-I cannot see the zone's configuration, so I may be missing a constraint.
+So a Cache Rule on the zone makes dynamic routes eligible, against Cloudflare's
+default. Once eligible, a request is
+[tiered before the origin's headers are read](https://github.com/cloudflare/cloudflare-docs/pull/33587). The `private` response then prevents storing, nothing is kept, and the
+next request takes the same detour.
+
+The upper tier is [picked by hashing the cache key, within a regional pool](https://github.com/cloudflare/cloudflare-docs/pull/33587)
+and without regard to where the origin sits. From Paris that pool includes Madrid.
+
+The rule has a purpose. Laravel Cloud [documents](https://laravel.com/cloud/docs/network#cache-control) that an
+application can have its own responses cached at the edge by sending
+`Cache-Control` headers. The same page notes that `Set-Cookie` prevents
+caching, and every route in Laravel's `web` group sets a session cookie and a
+CSRF token, so even a simple page with a form is excluded. The feature serves
+pages with no session at all, a blog or marketing pages, while every dynamic
+route pays for its eligibility.
+
+Laravel Cloud support confirmed the mechanism: these `BYPASS` responses go
+through an upper tier picked by hashing the URL, which caches nothing for them,
+so the extra hop is pure latency. The edge network is shared between all
+applications and is not changed for one of them; per-path cache rules are a
+[Private Cloud](https://laravel.com/cloud/docs/private-cloud/edge-network#cache-rules) feature.
 
 > [!IMPORTANT]
-> **Could the upper tier be pinned near each origin**, through Smart Tiered
-> Cache with a cloud region hint? Or could uncacheable routes be made ineligible
-> at request time, so that they answer `DYNAMIC` and skip tiering altogether?
+> **Should dynamic routes be eligible for cache by default on the shared
+> platform**, when most Laravel responses can never be cached? Left `DYNAMIC`,
+> they would go straight to the origin. Failing that, a tier close to the
+> origin with [Smart Tiered Cache](https://developers.cloudflare.com/smart-shield/configuration/smart-tiered-cache/) would at least limit the cost.
 
 ### References
 
+- [Laravel Cloud network, cache control](https://laravel.com/cloud/docs/network#cache-control):
+  applications opt into edge caching through `Cache-Control`; `Set-Cookie` prevents it.
+- [Default cache behavior](https://developers.cloudflare.com/cache/concepts/default-cache-behavior/):
+  caching follows the file extension, and HTML or JSON are not cached by default.
 - [Investigate uncached responses](https://developers.cloudflare.com/cache/troubleshooting/investigating-uncached-responses/)
   and [cache responses](https://developers.cloudflare.com/cache/concepts/cache-responses/): `DYNAMIC` is decided at request time, `BYPASS` at response time.
 - [cloudflare-docs PR #33587](https://github.com/cloudflare/cloudflare-docs/pull/33587)
@@ -192,6 +219,7 @@ php artisan db:seed --class=BenchRowSeeder --force
 
 bench/run.sh https://your-app.laravel.cloud frankfurt      # the matrix, ~4 min
 bench/tiered-cache.sh https://your-app.laravel.cloud       # the routing, ~30 s
+bench/ray-pairs.sh https://your-app.laravel.cloud          # cf-ray pairs, ~10 s
 ```
 
 `bench/run.sh` writes a JSON report per run under `bench/results/`, including a
@@ -204,7 +232,7 @@ state and whether the caches are warm, and every result file carries it.
 
 ## Caveats
 
-Measured on 23 and 24 September 2026, from one client in one location. Medians
+Measured from 23 to 25 September 2026, from one client in one location. Medians
 rest on 60 to 150 samples per scenario; the 99th percentiles on far fewer, and
 should be read as "this happened" rather than as a rate.
 
